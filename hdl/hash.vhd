@@ -9,6 +9,9 @@
 -- msgIn data. If the system is expecting a message longer than what it has
 -- already received, this will be treated as the next chunk of data. If the
 -- system is idle, this will trigger a new processing sequence.
+--
+-- The result is outputed by chunks of 64 bytes. A pulse on the outValid flag
+-- indicates that the output has just been updated.
 -- 
 -- The newDataRdy flag indicates that the system is ready to process a new
 -- chunk of data.
@@ -16,10 +19,10 @@
 -- The newReqRdy flag indicates that the sytem is in idle state and ready for
 -- a new processing sequence.
 --
--- If the Tag size is smaller than the maximum 1024 bytes, the relevant data
--- are the last bytes of the hash output (tagSize*8 -1 downto 0).
+-- If the tag size is not a multiple of 64 bytes, the relevant data of the
+-- last hash output are the last bytes (xx downto 0).
 --
-------------------------------------------------------------------------------
+-------------------------------------------------------------------------------
 --
 -- DISCLAIMER : Though I'm confident that it will work in most cases, I do not
 -- guarantee the correctness of this implementation.
@@ -36,7 +39,6 @@
 library IEEE;
 use IEEE.STD_LOGIC_1164.all;
 use IEEE.NUMERIC_STD.all;
-use IEEE.MATH_REAL.all;
 
 use work.blake2b;
 use work.le32;
@@ -48,12 +50,12 @@ entity hash is
 	port(
 		clk			: in  std_logic;
 		rst			: in  std_logic;
-		tagSize		: in  integer range 1 to 1024;
-		msgIn		: in  std_logic_vector( 128*8 -1 downto 0);
+		msgIn		: in  std_logic_vector(128*8 -1 downto 0);
 		inValid		: in  std_logic;
 		msgLength	: in  integer range 1 to 1024; --in bytes
+		tagSize		: in  integer range 1 to 1024; --in bytes
 
-		hash		: out std_logic_vector(1024*8 -1 downto 0);
+		hash		: out std_logic_vector( 64*8 -1 downto 0);
 		outValid	: out std_logic;
 		newDataRdy	: out std_logic;
 		newReqRdy	: out std_logic
@@ -72,7 +74,8 @@ architecture behav of hash is
 		INIT_END,
 		B2_WAIT_INIT,
 		CONT,
-		CONT_END
+		CONT_END,
+		OUT_WAIT
 	);
 	signal state: type_state := IDLE;
 
@@ -82,12 +85,14 @@ architecture behav of hash is
 	signal le32_t	: std_logic_vector(8*8 -1 downto 0);
 	signal min_64_t	: integer range 1 to 64;
 
-	-- Bytes already transmitted to Blake2 in first phase
+	--Bytes already transmitted to Blake2 in first phase
 	signal in_byte_count	: integer range 1 to 1024 := 1;
-	-- Position of last byte in last chunk of input	
+	--Position of last byte in last chunk of input	
 	signal last_byte_idx	: integer range 1 to  128 := 1;
-	-- Number of hashes performed in second phase
+	--Number of hashes performed in second phase
 	signal iter_count		: integer range 1 to   31 := 1;
+	--1 CC delay to avoid sending results in consecutive CC (state OUT_WAIT) 
+	signal scc_delay		: std_logic := '0';
 
 
 	-- Blake2b module control signals
@@ -103,29 +108,31 @@ architecture behav of hash is
 	signal b2_finish		: std_logic;
 
 
-	-- Storage for V_i
-	type Vmem is array (1 to 31) of std_logic_vector(64*8 -1 downto 0);
-	signal v : Vmem;
+	-- Storage for intermediate hashes
+	signal v : std_logic_vector( 32*8 -1 downto 0);
 
 
 	-- internal flags
 	signal new_data_rdy	: std_logic := '0';
 	signal new_req_rdy	: std_logic := '0';
-
-	signal DEBUG_STATE : integer range 1 to 6;
-
+--
+--------------------------------------------------------------------------------
+--
 begin
 
-	with state select
-		DEBUG_STATE <=	1 when IDLE,
-						2 when INIT,
-						3 when INIT_END,
-						4 when B2_WAIT_INIT,
-						5 when CONT,
-						6 when CONT_END;
-
-	r <= integer( ceil( real(t)/real(32) )) -2 when t > 64 else 0;
-
+	compute_r : process (t)
+	begin
+		if t <= 64 then
+			r <= 0;
+		elsif t mod 32 = 0 then
+			r <= to_integer(shift_right(to_unsigned(t, 12), 5)) -2;
+		else
+			r <= to_integer(shift_right(to_unsigned(t, 12), 5)) -1;
+		end if;
+	end process compute_r;
+--
+--------------------------------------------------------------------------------
+--
 	with state select
 		new_data_rdy <= '1'		when IDLE,
 						b2_rdy	when INIT,
@@ -146,11 +153,11 @@ begin
 			hash		<= (others => '0');
 			outValid	<= '0';
 
-			v			<= (others => (others => '0'));
-
 			in_byte_count	<= 1;
 			last_byte_idx	<= 1;
 			iter_count		<= 1;
+			scc_delay		<= '0';
+			v				<= (others => '0');
 
 			b2_msg_chk		<= (others => '0');
 			b2_new_chk		<= '0';
@@ -163,24 +170,28 @@ begin
 			--default values
 			b2_new_chk	<= '0';
 			b2_last_chk	<= '0';
+			outValid	<= '0';
 --
 --------------------------------------------------------------------------------
 -- Initialization
 
 			if state = IDLE and inValid = '1' then
 
+				--- set variables ---
+				hash <= (others => '0');
+
 				t <= tagSize;
 				b2_msg_length <= 8 + msgLength;
-				iter_count <= 1;
-				outValid <= '0';
-				hash <= (others => '0');
-				v <= (others => (others => '0'));
 
-				if (msgLength mod 128) = 0 then
-					last_byte_idx <= 128;
-				else
-					last_byte_idx <= (msgLength mod 128);
+				if (msgLength mod 128) = 0 then last_byte_idx <= 128;
+				else last_byte_idx <= (msgLength mod 128);
 				end if;
+
+				iter_count	<= 1;
+				scc_delay	<= '0';
+
+				v <= (others => '0');
+				---------------------
 
 
 				if msgLength > 128 then
@@ -192,11 +203,11 @@ begin
 
 				elsif msgLength <= 120 then
 					--no more chunks to come, and room for LE32(T)
-					b2_msg_chk( (msgLength+8)*8 -1 downto 0 )
-						 <= le32_t & msgIn( msgLength*8 -1 downto 0 );
-
-					b2_msg_chk( 128*8 -1 downto (msgLength+8)*8 )
-						 <= (others => '0');
+					b2_msg_chk((msgLength+8)*8 -1 downto msgLength*8) <= le32_t;
+					b2_msg_chk( msgLength   *8 -1 downto           0) <=
+											   msgIn( msgLength*8 -1 downto 0 );
+					b2_msg_chk( 128*8 -1 downto (msgLength+8)*8 ) <=
+															    (others => '0');
 
 					b2_new_chk  <= '1';
 					b2_last_chk <= '1';
@@ -212,26 +223,40 @@ begin
 					--no more chunks to come, some room but not enough
 					case msgLength is
 					when 127 =>
-						b2_msg_chk <= le32_t( 1        *8 -1 downto 0)
-									& msgIn ( msgLength*8 -1 downto 0);
+						b2_msg_chk(128*8 -1 downto 127*8) <=
+													   le32_t( 1*8 -1 downto 0);
+						b2_msg_chk(127*8 -1 downto     0) <=
+													   msgIn(127*8 -1 downto 0);
 					when 126 =>
-						b2_msg_chk <= le32_t( 2        *8 -1 downto 0)
-									& msgIn ( msgLength*8 -1 downto 0);
+						b2_msg_chk(128*8 -1 downto 126*8) <=
+													   le32_t( 2*8 -1 downto 0);
+						b2_msg_chk(126*8 -1 downto     0) <=
+													   msgIn(126*8 -1 downto 0);
 					when 125 =>
-						b2_msg_chk <= le32_t( 3        *8 -1 downto 0)
-									& msgIn ( msgLength*8 -1 downto 0);
+						b2_msg_chk(128*8 -1 downto 125*8) <=
+													   le32_t( 3*8 -1 downto 0);
+						b2_msg_chk(125*8 -1 downto     0) <=
+													   msgIn(125*8 -1 downto 0);
 					when 124 =>
-						b2_msg_chk <= le32_t( 4        *8 -1 downto 0)
-									& msgIn ( msgLength*8 -1 downto 0);
+						b2_msg_chk(128*8 -1 downto 124*8) <=
+													   le32_t( 4*8 -1 downto 0);
+						b2_msg_chk(124*8 -1 downto     0) <=
+													   msgIn(124*8 -1 downto 0);
 					when 123 =>
-						b2_msg_chk <= le32_t( 5        *8 -1 downto 0)
-									& msgIn ( msgLength*8 -1 downto 0);
+						b2_msg_chk(128*8 -1 downto 123*8) <=
+													   le32_t( 5*8 -1 downto 0);
+						b2_msg_chk(123*8 -1 downto     0) <=
+													   msgIn(123*8 -1 downto 0);
 					when 122 =>
-						b2_msg_chk <= le32_t( 6        *8 -1 downto 0)
-									& msgIn ( msgLength*8 -1 downto 0);
+						b2_msg_chk(128*8 -1 downto 122*8) <=
+													   le32_t( 6*8 -1 downto 0);
+						b2_msg_chk(122*8 -1 downto     0) <=
+													   msgIn(122*8 -1 downto 0);
 					when 121 =>
-						b2_msg_chk <= le32_t( 7        *8 -1 downto 0)
-									& msgIn ( msgLength*8 -1 downto 0);
+						b2_msg_chk(128*8 -1 downto 121*8) <=
+													   le32_t( 7*8 -1 downto 0);
+						b2_msg_chk(121*8 -1 downto     0) <=
+													   msgIn(121*8 -1 downto 0);
 					when others => NULL;
 					end case;
 
@@ -253,13 +278,15 @@ begin
 
 				else --last chunk of data
 
-					if last_byte_idx < 120 then
+					if last_byte_idx <= 120 then
 						--no need for additional chunk
-						b2_msg_chk((last_byte_idx+8)*8 -1 downto 0)
-							 <= le32_t & msgIn(last_byte_idx*8 -1 downto 0);
+						b2_msg_chk((last_byte_idx+8)*8 -1 downto
+									last_byte_idx*8) <= le32_t;
 
-						b2_msg_chk(128*8 -1 downto (last_byte_idx+8)*8)
-							 <= (others => '0');
+						b2_msg_chk( last_byte_idx   *8 -1 downto 0) <=
+										   msgIn( last_byte_idx*8 -1 downto 0 );
+						b2_msg_chk( 128*8 -1 downto (last_byte_idx+8)*8 ) <=
+															    (others => '0');
 
 						b2_new_chk  <= '1';
 						b2_last_chk <= '1';
@@ -273,9 +300,44 @@ begin
 						
 					else
 						--some room for LE32(T) but not enough
-						b2_msg_chk
-							 <= le32_t( (128-last_byte_idx)*8 -1 downto 0)
-							  & msgIn(last_byte_idx*8 -1 downto 0);
+						case last_byte_idx is
+						when 127 =>
+							b2_msg_chk(128*8 -1 downto 127*8) <=
+													   le32_t( 1*8 -1 downto 0);
+							b2_msg_chk(127*8 -1 downto     0) <=
+													   msgIn(127*8 -1 downto 0);
+						when 126 =>
+							b2_msg_chk(128*8 -1 downto 126*8) <=
+													   le32_t( 2*8 -1 downto 0);
+							b2_msg_chk(126*8 -1 downto     0) <=
+													   msgIn(126*8 -1 downto 0);
+							when 125 =>
+							b2_msg_chk(128*8 -1 downto 125*8) <=
+													   le32_t( 3*8 -1 downto 0);
+							b2_msg_chk(125*8 -1 downto     0) <=
+													   msgIn(125*8 -1 downto 0);
+						when 124 =>
+							b2_msg_chk(128*8 -1 downto 124*8) <=
+													   le32_t( 4*8 -1 downto 0);
+							b2_msg_chk(124*8 -1 downto     0) <=
+													   msgIn(124*8 -1 downto 0);
+						when 123 =>
+							b2_msg_chk(128*8 -1 downto 123*8) <=
+													   le32_t( 5*8 -1 downto 0);
+							b2_msg_chk(123*8 -1 downto     0) <=
+													   msgIn(123*8 -1 downto 0);
+						when 122 =>
+							b2_msg_chk(128*8 -1 downto 122*8) <=
+													   le32_t( 6*8 -1 downto 0);
+							b2_msg_chk(122*8 -1 downto     0) <=
+													   msgIn(122*8 -1 downto 0);
+						when 121 =>
+							b2_msg_chk(128*8 -1 downto 121*8) <=
+													   le32_t( 7*8 -1 downto 0);
+							b2_msg_chk(121*8 -1 downto     0) <=
+													   msgIn(121*8 -1 downto 0);
+						when others => NULL;
+						end case;
 
 						b2_new_chk <= '1';
 						state <= INIT_END;
@@ -288,11 +350,33 @@ begin
 
 			elsif state = INIT_END and b2_rdy = '1' and b2_new_chk = '0' then
 
-				b2_msg_chk((last_byte_idx -120)*8 -1 downto 0)
-					<= le32_t(8*8 -1 downto (128-last_byte_idx)*8);
-
-				b2_msg_chk(128*8 -1 downto (last_byte_idx)*8)
-					<= (others => '0');
+				case last_byte_idx is
+				when 128 =>
+					b2_msg_chk(  8*8 -1 downto 0) <= le32_t(8*8 -1 downto 0*8);
+					b2_msg_chk(128*8 -1 downto 8*8) <= (others => '0');
+				when 127 =>
+					b2_msg_chk(  7*8 -1 downto 0) <= le32_t(8*8 -1 downto 1*8);
+					b2_msg_chk(128*8 -1 downto 7*8) <= (others => '0');
+				when 126 =>
+					b2_msg_chk(  6*8 -1 downto 0) <= le32_t(8*8 -1 downto 2*8);
+					b2_msg_chk(128*8 -1 downto 6*8) <= (others => '0');
+				when 125 =>
+					b2_msg_chk(  5*8 -1 downto 0) <= le32_t(8*8 -1 downto 3*8);
+					b2_msg_chk(128*8 -1 downto 5*8) <= (others => '0');
+				when 124 =>
+					b2_msg_chk(  4*8 -1 downto 0) <= le32_t(8*8 -1 downto 4*8);
+					b2_msg_chk(128*8 -1 downto 4*8) <= (others => '0');
+				when 123 =>
+					b2_msg_chk(  3*8 -1 downto 0) <= le32_t(8*8 -1 downto 5*8);
+					b2_msg_chk(128*8 -1 downto 3*8) <= (others => '0');
+				when 122 =>
+					b2_msg_chk(  2*8 -1 downto 0) <= le32_t(8*8 -1 downto 6*8);
+					b2_msg_chk(128*8 -1 downto 2*8) <= (others => '0');
+				when 121 =>
+					b2_msg_chk(  1*8 -1 downto 0) <= le32_t(8*8 -1 downto 7*8);
+					b2_msg_chk(128*8 -1 downto 1*8) <= (others => '0');
+				when others => NULL;
+				end case;
 
 				b2_new_chk  <= '1';
 				b2_last_chk <= '1';
@@ -319,7 +403,6 @@ begin
 			elsif state = CONT and b2_finish = '1' and b2_new_chk = '0' then
 
 				if iter_count < r then
-					v(iter_count) <= b2_result;
 
 					b2_msg_chk(128*8 -1 downto 64*8) <= (others => '0');
 					b2_msg_chk( 64*8 -1 downto    0) <= b2_result;
@@ -328,18 +411,28 @@ begin
 					b2_msg_length <= 64;
 
 					iter_count <= iter_count +1;
+
+					if iter_count mod 2 = 0 then
+						 --output hash chunk
+						hash <= v & b2_result(64*8 -1 downto 32*8);
+						outValid <= '1';
+					else
+						--store hash chunk to be outputed next time
+						v <= b2_result(64*8 -1 downto 32*8);
+					end if;
 
 				else
 					state <= CONT_END;
 				end if;
 --
 --------------------------------------------------------------------------------
--- Concatenate hashes into final output
+-- Perform final hash
+-- The code is the same as in the previous part but the hash length is changed
+-- based solely on the state (see line 529).
 
 			elsif state = CONT_END and b2_finish = '1' and b2_new_chk = '0' then
 
 				if iter_count = r then
-					v(iter_count) <= b2_result;
 
 					b2_msg_chk(128*8 -1 downto 64*8) <= (others => '0');
 					b2_msg_chk( 64*8 -1 downto    0) <= b2_result;
@@ -349,20 +442,70 @@ begin
 
 					iter_count <= iter_count +1;
 
-				else
-					-- V_(r+1)
-					hash((t-32*r)*8 -1 downto 0) <= b2_result((t-32*r)*8 -1 downto 0);
-					-- V_r to V_1
-					for k in r downto 1 loop
-						hash((t-32*(k-1))*8 -1 downto (t-32*k)*8) <= v(k)(64*8 -1 downto 32*8);
-					end loop;
+					if iter_count mod 2 = 0 then
+						 --output hash chunk
+						hash <= v & b2_result(64*8 -1 downto 32*8);
+						outValid <= '1';
+					else
+						--store hash chunk to be outputed next time
+						v <= b2_result(64*8 -1 downto 32*8);
+					end if;
+--
+--------------------------------------------------------------------------------
+-- Last chunk of output (if there is enough room)
 
+				else
+					if iter_count mod 2 = 1 then
+						--64 bytes available for output
+						hash <= b2_result;
+						outValid <= '1';
+						state <= IDLE;
+
+					else
+						--32 bytes available for output
+						if (t-32*r) <= 32 then
+							--less than 32 bytes needed for output;
+							hash <= (others => '0');
+							hash((t-32*r+32)*8 -1 downto (t-32*r)*8) <= v;
+							hash((t-32*r)   *8 -1 downto          0) <=
+											  b2_result((t-32*r)*8 -1 downto 0);
+
+							outValid <= '1';
+							state <= IDLE;
+
+						else
+							--more than 32 bytes needed for output;
+							hash(64*8 -1 downto 32*8) <= v;
+							hash(32*8 -1 downto    0) <=
+								  b2_result((t-32*r)*8 -1 downto (t-32*r-32)*8);
+
+							v((t-32*r-32)*8 -1 downto 0) <=
+										   b2_result((t-32*r-32)*8 -1 downto 0);
+							
+							outValid <= '1';
+							state <= OUT_WAIT;
+
+						end if;
+					end if;
+				end if;
+--
+--------------------------------------------------------------------------------
+-- Final chunk of output if there was no room in the former one
+
+			elsif state = OUT_WAIT then
+
+				if scc_delay = '0' then --wait 1 clock cycle between two chunks
+					scc_delay <= '1';
+
+				else
+					hash <= (others => '0');
+					hash((t-32*r-32)*8 -1 downto 0) <= v((t-32*r-32)*8 -1 downto 0);
 					outValid <= '1';
 					state <= IDLE;
 
 				end if;
-			end if;
 
+			end if;
 		end if;
 	end process;
 --
