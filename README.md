@@ -7,17 +7,17 @@
 
 Copyright (C) 2018 (in alphabetical order:)
 
-Robin ARBAUD
-Andreas DEJMEK
-Andreas HIRTENLEHNER
-Petar KOSIC
-Christian KRIEG
-Markus MAD
-Florian MUTTENTHALER
-Reza RASHIDI
-Constantin SCHIEBER
-Rupert SCHORN
-Alexander SCHWED
+Robin ARBAUD,
+Andreas DEJMEK,
+Andreas HIRTENLEHNER,
+Petar KOSIC,
+Christian KRIEG,
+Markus MAD,
+Florian MUTTENTHALER,
+Reza RASHIDI,
+Constantin SCHIEBER,
+Rupert SCHORN,
+Alexander SCHWED,
 Benedikt TUTZER
 
 
@@ -36,3 +36,5 @@ THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES WITH RE
 # Concluding remarks
 
 # References
+
+https://www.cryptolux.org/images/0/0d/Argon2.pdf
