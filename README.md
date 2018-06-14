@@ -1,6 +1,10 @@
 # argon2
  VHDL implementation of Argon2 memory-hard function for password hashing and other applications
 
+<aside class="warning">
+This is work in progress! We will remove this warning once there is a synthesizable version of this core.
+</aside>
+
 # Usage
 
 # License
