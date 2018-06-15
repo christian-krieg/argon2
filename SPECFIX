@@ -1,0 +1,149 @@
+#----------------------------------------------------------------------------
+#
+# This document is intended to collect issues in the Argon2 specification we
+# discovered while implementing it in VHDL.
+#
+# The specification we implement is the Internet-Draft titled
+#
+#    The memory-hard Argon2 password hash and proof-of-work function
+#      draft-irtf-cfrg-argon2-03
+#
+# available at
+#
+#    https://datatracker.ietf.org/doc/draft-irtf-cfrg-argon2/
+#
+#----------------------------------------------------------------------------
+#
+# Issue 1: Page 5, 3.2 Argon2 Operation
+#
+
+1. Establish H_0 as the 64-bit value as shown below.
+
+#
+# should be
+#
+
+1. Establish H_0 as the 64-byte value as shown below.
+
+#
+#----------------------------------------------------------------------------
+#
+# Issue 2: Page 7, 3.3 Variable-length hash function H'
+#
+
+if T <= 64
+	H'(X) = H^T(T||X)
+
+#
+# should be
+#
+
+if T <= 64
+	H'(X) = H^T(LE32(T)||X)
+#
+#----------------------------------------------------------------------------
+#
+# Issue 3: Page 8, 3.4.1 Indexing / Getting the 32-bit values J_1 and J_2
+#
+
+The purpose of J_1 and J_2 is not totally clear. Are they ambiguous
+identifiers for i' and j'? Are they temporary variables? Please make this
+clear to support the reader's understanding.
+
+#
+#----------------------------------------------------------------------------
+#
+# Issue 4: Page 8, 3.4.1.1 Getting the 32-bit values J_1 and J_2 / Argon2d
+#
+
+J_1 = int32(extract(B[i][j-1], 1))
+J_2 = int32(extract(B[i][j-1], 2))
+
+#
+# should be
+#
+
+J_1 = int32(extract(B[i][j-1], 0))
+J_2 = int32(extract(B[i][j-1], 1))
+
+#
+#----------------------------------------------------------------------------
+#
+# Issue 5: Page 9, 3.4.2 Mapping J_1 and J_2 to reference block index
+#
+
+"The value of l = J_2 mod p gives the index of the lane from which the
+block will be taken."
+
+#
+# Question:
+#
+
+Is l an ambiguous identifier for i'?
+
+#
+#----------------------------------------------------------------------------
+#
+# Issue 6: Page 10, 3.4.2 Mapping J_1 and J_2 to reference block index
+#
+
+"The value of z gives the reference block index in W."
+
+#
+# Question:
+#
+
+Is z an ambiguous identifier for j'?
+
+#
+#----------------------------------------------------------------------------
+#
+# Issue 7: Page 10, 3.5 Compression function G
+#
+
+"Compression function G is built upon the BLAKE2b round function P."
+
+#
+# Remark:
+#
+
+In RFC7693, "The BLAKE2 Cryptographic Hash and Message Authentication
+Code (MAC)", there is no such "round function P" defined. For my
+understanding, you refer to the BLAKE2b compression function F, with
+m[0..15] = 0, t = 0, f = 0. Is this correct? If so, could you please make
+this clear?
+
+#
+#----------------------------------------------------------------------------
+#
+# Issue 8: Page 10, 3.5 Compression function G
+#
+
+P operates on the 128-byte input, which can be viewed as 8 16-byte
+registers:
+
+#
+# should be
+#
+
+P operates on the 128-bit input, which can be viewed as 8 16-byte
+registers:
+
+#
+#----------------------------------------------------------------------------
+#
+# Issue 9: Page 11, 3.6 Permutation P
+#
+
+Permutation P is based on the round function of BLAKE2b.
+
+#
+# Remark:
+#
+
+Again, it is unclear how Permutation P is based on the "round function" of
+BLAKE2b. Could you please clarify this?
+
+#
+#----------------------------------------------------------------------------
+
