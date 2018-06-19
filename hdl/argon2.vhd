@@ -84,6 +84,9 @@ architecture behavioral of Argon2 is
     signal state      : state_t := STATE_IDLE;
     signal state_next : state_t := STATE_IDLE;
 
+    signal h_0      : std_logic_vector(64*8-1 downto 0);
+    signal h_0_next : std_logic_vector(64*8-1 downto 0);
+
     -- memory
     signal s_mem_address  : std_logic_vector(26 downto 0);
     signal s_mem_data_in  : std_logic_vector(15 downto 0);
@@ -92,19 +95,46 @@ architecture behavioral of Argon2 is
     signal s_mem_data_out : std_logic_vector(15 downto 0);
 
     -- HASH function
-    signal s_hash_start            : std_logic  := '0';
-    signal s_hash_message          : std_logic_vector(1024*8-1 downto 0) 
-                                                := (others => '0');
-    signal s_hash_message_chunk    : std_logic_vector(128*8-1 downto 0) 
-                                                := (others => '0');
-    signal s_hash_message_len_byte : integer    := 0;
-    signal s_hash_out              : std_logic_vector(64*8-1 downto 0) 
-                                                := (others => '0');
-    signal s_hash_valid            : std_logic  := '0';
-    signal s_hash_ready            : std_logic  := '0';
-    signal s_hash_chunk_count      : integer    := 0;
-    signal s_hash                  : std_logic_vector(1024*8-1 downto 0) 
-                                                := (others => '0');
+    signal s_hash_start                 : std_logic  := '0';
+    signal s_hash_start_next            : std_logic  := '0';
+    signal s_hash_message               : std_logic_vector(1024*8-1 downto 0) 
+                                                     := (others => '0');
+    signal s_hash_message_next          : std_logic_vector(1024*8-1 downto 0) 
+                                                     := (others => '0');
+    signal s_hash_message_chunk         : std_logic_vector(128*8-1 downto 0) 
+                                                     := (others => '0');
+    signal s_hash_message_chunk_next    : std_logic_vector(128*8-1 downto 0) 
+                                                     := (others => '0');
+    signal s_hash_message_len_byte      : integer    := 0;
+    signal s_hash_message_len_byte_next : integer    := 0;
+    signal s_hash_out                   : std_logic_vector(64*8-1 downto 0) 
+                                                     := (others => '0');
+    signal s_hash_out_next              : std_logic_vector(64*8-1 downto 0) 
+                                                     := (others => '0');
+    signal s_hash_valid                 : std_logic  := '0';
+    signal s_hash_data_ready            : std_logic  := '0';
+    signal s_hash_req_ready             : std_logic  := '0';
+    signal s_hash_chunk_count           : integer    := 0;
+    signal s_hash_chunk_count_next      : integer    := 0;
+    signal s_hash_len_byte              : integer range 1 to 1024 := 64;
+    signal s_hash_len_byte_next         : integer range 1 to 1024 := 64;
+
+    -- le32
+    type t_le32_in  is array (7 downto 0) of integer;
+    type t_le32_out is array (7 downto 0) of std_logic_vector(8*8-1 downto 0);
+    
+    signal s_le32_in  : t_le32_in;
+    signal s_le32_out : t_le32_out;
+
+    signal s_le32_deg_of_parallelism    : std_logic_vector(8*8-1 downto 0);
+    signal s_le32_tag_len_byte_buf      : std_logic_vector(8*8-1 downto 0);
+    signal s_le32_memory_size_kib       : std_logic_vector(8*8-1 downto 0);
+    signal s_le32_iteration_count_buf   : std_logic_vector(8*8-1 downto 0);
+    signal s_le32_version               : std_logic_vector(8*8-1 downto 0);
+    signal s_le32_argon_type_buf        : std_logic_vector(8*8-1 downto 0);
+    signal s_le32_password_len_byte_buf : std_logic_vector(8*8-1 downto 0);
+    signal s_le32_salt_len_byte_buf     : std_logic_vector(8*8-1 downto 0);
+    
 --
 -------------------------------------------------------------------------------
 --  Component declarations
@@ -162,27 +192,9 @@ architecture behavioral of Argon2 is
     component le32 is
         port(
             input : in integer;
-            output: out std_logic_vector(8*8 -1 downto 0)
+            output: out std_logic_vector(8*8-1 downto 0)
         );
 	end component le32;
-
-    component length
-        generic(
-            CHUNK_SIZE	: integer := 16; --in Bytes
-            MAX_LENGTH	: integer := 1024 --in Bytes
-        );
-        port(
-            clk		: in  std_logic;
-            dataIn	: in  std_logic_vector( CHUNK_SIZE*8 -1 downto 0 );
-            dataNew	: in  std_logic;
-            dataEnd	: in  std_logic;
-            pending	: in  std_logic;
-
-            length	: out integer range 0 to MAX_LENGTH;
-            finish	: out std_logic;
-            tooLong : out std_logic
-        );
-    end component length;
 
     component floor
     	port(
@@ -231,16 +243,43 @@ begin
         port map(
             clk			=> clk,
             rst			=> reset,
-            tagSize		=> s_tag_len_byte_buf,
+            tagSize		=> s_hash_len_byte,
             msgIn		=> s_hash_message_chunk,
             inValid		=> s_hash_start,
             msgLength   => s_hash_message_len_byte,
 
             hash		=> s_hash_out,
             outValid	=> s_hash_valid,
-            newDataRdy	=> s_hash_ready,
-            newReqRdy	
+            newDataRdy	=> s_hash_data_ready,
+            newReqRdy	=> s_hash_req_ready
         );
+
+    le32_gen : for i in 0 to 7 generate
+        le32_inst: le32
+            port map(
+                input  => s_le32_in(i),
+                output => s_le32_out(i)
+            );
+    end generate le32_gen;
+
+    s_le32_in(0) <= DEG_OF_PARALLELISM;
+    s_le32_in(1) <= s_tag_len_byte_buf;
+    s_le32_in(2) <= MEMORY_SIZE_KIB;
+    s_le32_in(3) <= s_iteration_count_buf;
+    s_le32_in(4) <= VERSION;
+    s_le32_in(5) <= s_argon_type_buf;
+    s_le32_in(6) <= s_password_len_byte_buf;
+    s_le32_in(7) <= s_salt_len_byte_buf;
+
+    s_le32_deg_of_parallelism    <= s_le32_out(0);
+    s_le32_tag_len_byte_buf      <= s_le32_out(1);
+    s_le32_memory_size_kib       <= s_le32_out(2);
+    s_le32_iteration_count_buf   <= s_le32_out(3);
+    s_le32_version               <= s_le32_out(4);
+    s_le32_argon_type_buf        <= s_le32_out(5);
+    s_le32_password_len_byte_buf <= s_le32_out(6);
+    s_le32_salt_len_byte_buf     <= s_le32_out(7);
+
 --
 -------------------------------------------------------------------------------
 --
@@ -249,26 +288,49 @@ begin
     sync : process (clk, reset)
     begin
         if(reset = '1') then
-            state         <= STATE_IDLE;
-            s_ready       <= '0';
+            state                   <= STATE_IDLE;
+            s_ready                 <= '0';
+            s_hash_start            <= '0';
+            s_hash_chunk_count      <= 0;
+            s_hash_len_byte         <= 64;
+            s_hash_message          <= (others => '0');
+            s_hash_message_len_byte <= 0;
+            s_hash_chunk_count      <= 0;
+            s_hash_message_chunk    <= (others => '0');
+            h_0                     <= (others => '0');
 
         elsif(CLK'event and CLK='1') then   
-            state         <= state_next;
-            s_ready       <= s_ready_next;
+            state                   <= state_next;
+            s_ready                 <= s_ready_next;
+            s_hash_start            <= s_hash_start_next;
+            s_hash_chunk_count      <= s_hash_chunk_count_next;
+            s_hash_len_byte         <= s_hash_len_byte_next;
+            s_hash_message          <= s_hash_message_next;
+            s_hash_message_len_byte <= s_hash_message_len_byte_next;
+            s_hash_chunk_count      <= s_hash_chunk_count_next;
+            s_hash_message_chunk    <= s_hash_message_chunk_next;
+            h_0                     <= h_0_next;
         end if;
     end process sync;
 
     state_machine : process (clk)
     begin
-        state_next         <= state;
-        s_ready_next       <= s_ready;
-        s_hash_start_next  <= s_hash_start;
+        state_next                   <= state;
+        s_ready_next                 <= s_ready;
+        s_hash_start_next            <= s_hash_start;
+        s_hash_chunk_count_next      <= s_hash_chunk_count;
+        s_hash_len_byte_next         <= s_hash_len_byte;
+        s_hash_message_next          <= s_hash_message;
+        s_hash_message_len_byte_next <= s_hash_message_len_byte;
+        s_hash_chunk_count_next      <= s_hash_chunk_count;
+        s_hash_message_chunk_next    <= s_hash_message_chunk;
+        h_0_next                     <= h_0;
 
         case state is
             when STATE_IDLE => 
                 s_ready_next <= '1';
                 
-                if(start = '1' and s_hash_ready = '1') then
+                if(start = '1' and s_hash_req_ready = '1') then
                     -- buffer inputs
                     s_password_buf          <= password;
                     s_password_len_byte_buf <= password_len_byte;
@@ -277,14 +339,58 @@ begin
                     s_argon_type_buf        <= argon_type;
                     s_salt_buf              <= salt;
                     s_salt_len_byte_buf     <= salt_len_byte;
+                    
+                    s_hash_message_len_byte_next <= 80 + 
+                                                    s_password_len_byte_buf + 
+                                                    s_salt_len_byte_buf;
 
-                    -- call hash function to calc H_0
+                    -- hash message to calc H_0
+                    s_hash_message_next((80+s_password_len_byte_buf+s_salt_len_byte_buf)*8-1 downto 0) <=  
+                                            s_le32_deg_of_parallelism &
+                                            s_le32_tag_len_byte_buf &
+                                            s_le32_memory_size_kib &
+                                            s_le32_iteration_count_buf &
+                                            s_le32_version &
+                                            s_le32_argon_type_buf &
+                                            s_le32_password_len_byte_buf &
+                                            s_password_buf(s_password_len_byte_buf*8-1 downto 0) & 
+                                            s_le32_salt_len_byte_buf & 
+                                            s_salt_buf(s_salt_len_byte_buf*8-1 downto 0) &
+                                            x"00000000" &
+                                            x"00000000";
 
-                    s_ready_next      <= '0';
-                    s_hash_start_next <= '1';
-                    state_next        <= STATE_INIT;
+                    s_hash_chunk_count_next      <=  (s_hash_message_len_byte-1)/128;
+                    s_hash_message_chunk_next    <=  s_hash_message(128*8*((s_hash_message_len_byte-1)/128+1)-1 downto
+                                                                    128*8*(s_hash_message_len_byte-1)/128);
+                    
+                    s_ready_next            <= '0';
+                    s_hash_start_next       <= '1';
+                    s_hash_chunk_count_next <=  0;
+                    s_hash_len_byte_next    <=  64;
+                    state_next              <= STATE_INIT;
                 end if;
             when STATE_INIT => 
+                s_hash_start_next <= '0';
+
+                if(s_hash_data_ready = '1' and s_hash_chunk_count > 0) then
+                    s_hash_message_chunk_next <= s_hash_message(128*8*(s_hash_chunk_count+1)-1 downto
+                                                                128*8*s_hash_chunk_count);
+                    s_hash_chunk_count_next   <= s_hash_chunk_count - 1;
+                    s_hash_start_next         <= '1';
+                elsif(s_hash_valid = '1') then
+                    h_0_next   <= s_hash_out;
+                    state_next <= STATE_ROW0;
+                end if;
+
+            when STATE_ROW0 =>
+
+            when STATE_ROW1 => 
+
+            when STATE_COMPRESS =>
+
+            when STATE_FINAL_BLOCK =>
+
+            when STATE_OUTPUT_TAG =>
 
         end case;
     end process state_machine;
